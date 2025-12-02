@@ -1,4 +1,4 @@
-# Vision AI (RGB + IR Fire Detection)
+# EOIR Fire Detector
 
 NXP i.MX8M Plus 환경을 우선 대상으로 하는 듀얼 카메라 화재 감지 파이프라인입니다. RGB(객체 탐지)와 IR(화점 탐지)을 동시에 처리하고, TCP로 전송하거나 GUI에서 모니터링/제어할 수 있습니다.
 
@@ -78,4 +78,3 @@ RGB_INPUT_MODE=video RGB_VIDEO_PATH=/data/rgb.mp4 IR_INPUT_MODE=mock python3 app
 - `gui/app_gui.py` PyQt6 GUI
 - `capture.py` 캡처 스크립트 (옵션 추론 저장)
 - `utils/capture_loader.py` 캡처 재생 로더
-
