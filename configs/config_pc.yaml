@@ -15,7 +15,7 @@ CAMERA:
     SLEEP: 0.033
     DEVICE: "/dev/video2"        # 고해상도 웹캠 경로
 
-TARGET_RES: [960, 540]
+TARGET_RES: [960, 544]
 MODEL: ./model/8n_640_v2/best_full_integer_quant.tflite
 LABEL: ./model/labels.txt
 DELEGATE: ""                   # PC에서는 CPU로 실행

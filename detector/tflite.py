@@ -8,6 +8,7 @@ import threading
 import numpy as np
 import tflite_runtime.interpreter as tflite
 import logging
+from typing import List, Tuple
 
 # ===== 로그 유틸 =====
 LOG_EVERY_SEC = float(os.getenv("DET_LOG_EVERY", "2.0"))  # 0이면 하트비트 비활성
@@ -294,12 +295,12 @@ class TFLiteWorker(threading.Thread):
         in_dtype = self.inp["dtype"]                  # 보통 np.int8
         self._input_buf = np.empty(in_shape, dtype=in_dtype)
 
-    def _load_labels(self, path):
+    def _load_labels(self, path: str) -> List[str]:
         # 기존처럼 한 줄당 한 클래스 이름이 있는 txt 파일을 사용
         with open(path, "r", encoding="utf-8") as f:
             return [ln.strip() for ln in f if ln.strip()]
 
-    def _make_interpreter(self):
+    def _make_interpreter(self) -> Tuple[tflite.Interpreter, dict, list, str]:
         delegates = None
         accel = "CPU"
         if self.use_npu and self.delegate_lib and os.path.exists(self.delegate_lib):
@@ -319,7 +320,7 @@ class TFLiteWorker(threading.Thread):
         _p(self.name, f"TFLite accel={accel}, threads={self.cpu_threads}")
         return itp, inp, outs, accel
 
-    def _get_outputs_float(self):
+    def _get_outputs_float(self) -> List[np.ndarray]:
         outs = []
         for od in self.outs:
             arr = self.itp.get_tensor(od["index"])
@@ -331,7 +332,7 @@ class TFLiteWorker(threading.Thread):
             outs.append(arr)
         return outs
 
-    def _infer_once(self, frame_bgr):
+    def _infer_once(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         한 프레임 처리:
         1) letterbox + 전처리

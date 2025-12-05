@@ -1,3 +1,4 @@
+import logging
 import os
 import cv2
 import time
@@ -10,38 +11,11 @@ from core.state import camera_state
 from camera.frame_source import FrameSource
 from camera.device_selector import CameraDeviceSelector
 
-
-def _log(msg):
-    print(f"[RGBCamera] {msg}")
+logger = logging.getLogger(__name__)
 
 
-def _open_capture(dev_path, dev_num, size, fps):
-    """한 번의 시도로 캡처를 연다. 성공/실패 여부만 반환."""
-    _log(f"Opening video device: {dev_path} (index: {dev_num})")
-    w, h = size
-
-    gst_pipeline = (
-        f"v4l2src device={dev_path} ! "
-        f"video/x-raw,format=NV12,width={w},height={h},framerate={fps}/1 ! "
-        "videoconvert ! appsink"
-    )
-    cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-
-    if cap.isOpened():
-        return cap
-
-    _log("GStreamer backend failed, trying V4L2 with device index...")
-    cap = cv2.VideoCapture(dev_num if dev_num is not None else dev_path, cv2.CAP_V4L2)
-    if cap.isOpened():
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'NV12'))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        cap.set(cv2.CAP_PROP_FPS, fps)
-    return cap
-
-
-def _log(msg):
-    print(f"[RGBCamera] {msg}")
+def _log(msg, level=logging.INFO):
+    logger.log(level, "[RGBCamera] %s", msg)
 
 
 def _open_capture(dev_path, dev_num, size, fps):
@@ -59,7 +33,7 @@ def _open_capture(dev_path, dev_num, size, fps):
     if cap.isOpened():
         return cap
 
-    _log("GStreamer backend failed, trying V4L2 with device index...")
+    _log("GStreamer backend failed, trying V4L2 with device index...", level=logging.WARNING)
     cap = cv2.VideoCapture(dev_num if dev_num is not None else dev_path, cv2.CAP_V4L2)
     if cap.isOpened():
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'NV12'))
@@ -76,6 +50,8 @@ class RGBCamera(FrameSource):
         self.thread = None
         self.stop_event = threading.Event()
         self.last_ts = None
+        self._cap_fail_count = 0
+        self._reconnect_fail_threshold = 30
 
         self.fps = cfg['FPS']
         self.size = cfg['RES']
@@ -91,8 +67,10 @@ class RGBCamera(FrameSource):
         self.init_cam()
 
     def __del__(self):
-        if self.cap:
-            self.cap.release()
+        try:
+            self.stop()
+        except Exception:
+            pass
 
     def _print_cap_info(self, device, frame):
         req_w, req_h = self.size
@@ -108,7 +86,16 @@ class RGBCamera(FrameSource):
         )
         _log(f"FPS - requested: {self.fps}, reported: {rep_fps:.2f}")
 
+    def _release_cap(self):
+        if self.cap:
+            try:
+                self.cap.release()
+            except Exception as exc:
+                _log(f"Failed to release capture: {exc}", level=logging.DEBUG)
+            self.cap = None
+
     def init_cam(self):
+        self._release_cap()
         device_override = getattr(self, 'device_override', None)
         device = device_override if device_override is not None else self._get_device()
         dev_path = device
@@ -123,7 +110,7 @@ class RGBCamera(FrameSource):
                 dev_num = None
         
         self.cap = _open_capture(dev_path, dev_num, self.size, self.fps)
-        
+
         if not self.cap.isOpened():
             try:
                 subprocess.run(
@@ -131,20 +118,20 @@ class RGBCamera(FrameSource):
                     check=False,
                     capture_output=True
                 )
-                _log("Ran 'udevadm trigger', retrying capture...")
+                _log("Ran 'udevadm trigger', retrying capture...", level=logging.WARNING)
                 time.sleep(2.0)
                 self.cap = _open_capture(dev_path, dev_num, self.size, self.fps)
             except Exception as e:
-                _log(f"udevadm trigger failed: {e}")
+                _log(f"udevadm trigger failed: {e}", level=logging.WARNING)
 
         if self.cap.isOpened():
             ret, frame = self.cap.read()
             if ret:
                 self._print_cap_info(dev_path or self._get_device(), frame)
             else:
-                _log(f"Device opened but failed to read frame from {dev_path}")
+                _log(f"Device opened but failed to read frame from {dev_path}", level=logging.WARNING)
         else:
-            _log(f"Failed to open device {dev_path}")
+            _log(f"Failed to open device {dev_path}", level=logging.ERROR)
             
     def _get_device(self):
         raise NotImplementedError("_get_device() must be implemented in subclass")
@@ -152,11 +139,13 @@ class RGBCamera(FrameSource):
     def capture(self):
         ret, frame = self.cap.read()
         if not ret or frame is None:
-            if not hasattr(self, '_cap_fail_count'):
-                self._cap_fail_count = 0
             self._cap_fail_count += 1
-            if self._cap_fail_count % 100 == 1:
-                _log(f"Capture failed (count: {self._cap_fail_count})")
+            if self._cap_fail_count % 30 == 1:
+                _log(f"Capture failed (count: {self._cap_fail_count})", level=logging.WARNING)
+            if self._cap_fail_count >= self._reconnect_fail_threshold and not self.stop_event.is_set():
+                _log("Capture failing repeatedly, reinitializing camera...", level=logging.WARNING)
+                self.init_cam()
+                self._cap_fail_count = 0
             return None, None
         
         # 프레임 유효성 검사 (너무 작은 해상도/채널 오류 방지)
@@ -189,6 +178,7 @@ class RGBCamera(FrameSource):
             frame = cv2.flip(frame, 0)
         
         ts = datetime.now().strftime("%y%m%d%H%M%S%f")[:-4]
+        self._cap_fail_count = 0
         return frame, ts
 
     def start(self):    
@@ -223,12 +213,7 @@ class RGBCamera(FrameSource):
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)
         self.thread = None
-        if self.cap:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-            self.cap = None
+        self._release_cap()
 
 class FrontRGBCamera(RGBCamera):
     def _get_device(self):

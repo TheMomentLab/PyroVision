@@ -10,9 +10,8 @@ import json
 import zlib
 import base64
 import os
-from datetime import datetime
 
-from core.fire_fusion import FireFusion, draw_fire_annotations, apply_vis_mode
+from core.fire_fusion import FireFusion, prepare_fusion_for_output
 from core.state import (
     LabelScaleState,
     DEFAULT_LABEL_SCALE,
@@ -20,6 +19,7 @@ from core.state import (
     MAX_LABEL_SCALE,
     LABEL_SCALE_STEP,
 )
+from core.util import ts_to_epoch_ms
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +92,8 @@ class ImageSender:
             # 명령 파싱 (JSON)
             try:
                 command_dict = json.loads(payload.decode('utf-8'))
-            except Exception:
-                logger.warning("Control command decode failed")
+            except json.JSONDecodeError as e:
+                logger.warning("Control command decode failed: %s", e)
                 return
             command = command_dict.get('command', '')
             
@@ -116,9 +116,11 @@ class ImageSender:
         except BlockingIOError:
             # 데이터가 없음 (정상)
             pass
+        except (socket.error, OSError) as e:
+            logger.error("Control command socket error: %s", e)
+            self.connected = False
         except Exception as e:
-            # 다른 에러는 무시 (제어 명령은 선택적)
-            pass
+            logger.exception("Unexpected control command error: %s", e)
     
     def send_frame_data(self, data_dict):
         """프레임 데이터를 직렬화하여 전송"""
@@ -163,8 +165,9 @@ class ImageSender:
         if self.sock:
             try:
                 self.sock.close()
-            except:
-                pass
+            except OSError as e:
+                logger.debug("Socket close error: %s", e)
+            self.sock = None
             logger.info("Connection closed")
 
     def _adjust_label_scale(self, delta=None, reset=False):
@@ -188,20 +191,9 @@ class ImageSender:
             return self.label_state.get()
         with self.control_lock:
             return self._label_scale
-
-
-def _ts_to_epoch_ms(ts):
-    if not ts:
-        return None
-    try:
-        return datetime.strptime(ts, "%y%m%d%H%M%S%f").timestamp() * 1000.0
-    except Exception:
-        return None
-
-
 def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                 jpeg_quality=70, resize_factor=1, sync_cfg=None, stop_event=None,
-                coord_state=None, label_state=None):
+                coord_state=None, label_state=None, ir_size=None, rgb_size=None):
     """
     이미지 버퍼를 읽어서 TCP 소켓으로 전송 (JSON+zlib+base64)
     - 최신 프레임만 전송하여 적체를 방지
@@ -218,6 +210,8 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
         resize_factor: 전송 전 리사이즈 비율 (2=1/2, 3=1/3, 1=원본)
     """
     label_state = label_state or LabelScaleState(DEFAULT_LABEL_SCALE)
+    ir_size = tuple(ir_size or (160, 120))
+    rgb_size = tuple(rgb_size or (960, 540))
     sender = ImageSender(host, port, label_state=label_state)
     
     # 연결 재시도 (초기)
@@ -234,11 +228,11 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
         logger.error("Failed to connect after retries. Sender exiting.")
         return
     
-    # Fire Fusion 초기화 (IR 160x120 → RGB 960x540)
+    # Fire Fusion 초기화
     def build_fusion(params):
         return FireFusion(
-            ir_size=(160, 120),
-            rgb_size=(960, 540),
+            ir_size=ir_size,
+            rgb_size=rgb_size,
             offset_x=params.get('offset_x', 0.0),
             offset_y=params.get('offset_y', 0.0),
             scale=params.get('scale'),
@@ -421,26 +415,20 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                 # ===== Fire Fusion (IR 게이트키퍼) =====
                 fusion_result = fire_fusion.fuse(last_ir_hotspots, eo_detections)
                 
-                # 융합 결과에 따라 bbox 다시 그리기 (색상 구분)
-                if fusion_result and fusion_result.get('eo_annotations'):
-                    anns = apply_vis_mode(fusion_result['eo_annotations'], vis_mode)
-                    logger.debug(
-                        "[Sender] vis_mode=%s anns_in=%d anns_out=%d ir_hotspot=%d",
-                        vis_mode, len(fusion_result['eo_annotations']), len(anns), len(last_ir_hotspots)
+                fusion_payload = None
+                if fusion_result:
+                    if label_state:
+                        current_label_scale = label_state.get()
+                    else:
+                        current_label_scale = sender.get_label_scale()
+                    fusion_payload, rgb_det_frame = prepare_fusion_for_output(
+                        fusion_result,
+                        det_frame=rgb_det_frame,
+                        vis_mode=vis_mode,
+                        label_scale=current_label_scale,
+                        default_label_scale=DEFAULT_LABEL_SCALE,
+                        json_safe=True,
                     )
-                    fusion_result['eo_annotations'] = anns
-                    if anns:
-                        if label_state:
-                            current_label_scale = label_state.get()
-                        else:
-                            current_label_scale = sender.get_label_scale()
-                        thickness_scale = current_label_scale / DEFAULT_LABEL_SCALE if DEFAULT_LABEL_SCALE else 1.0
-                        rgb_det_frame = draw_fire_annotations(
-                            rgb_det_frame,
-                            anns,
-                            font_scale=current_label_scale,
-                            thickness_scale=thickness_scale,
-                        )
                 
                 # 리사이즈
                 if resize_factor > 1:
@@ -465,8 +453,8 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
             # 동기화 검사
             if sync_enabled:
                 if ir_item and rgb_det_item:
-                    t_ir = _ts_to_epoch_ms(ir_item[1])
-                    t_rgb = _ts_to_epoch_ms(rgb_det_item[1])
+                    t_ir = ts_to_epoch_ms(ir_item[1])
+                    t_rgb = ts_to_epoch_ms(rgb_det_item[1])
                     if t_ir and t_rgb:
                         diff_ms = abs(t_ir - t_rgb)
                         if diff_ms > sync_max_diff:
@@ -478,23 +466,14 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                     continue
 
             # ===== Fusion 결과를 패킷에 추가 =====
-            if fusion_result:
-                anns = fusion_result.get('eo_annotations') or []
-                # JSON 직렬화 안전하게 색상 튜플을 리스트로 변환
-                anns_json = []
-                for ann in anns:
-                    ann_copy = dict(ann)
-                    color = ann_copy.get('color')
-                    if color is not None:
-                        ann_copy['color'] = list(color)
-                    anns_json.append(ann_copy)
+            if fusion_payload:
                 packet['fire_fusion'] = {
-                    'fire_detected': fusion_result.get('fire_detected', False),
-                    'confidence': fusion_result.get('confidence', 0.0),
-                    'status': fusion_result.get('status', 'NO_FIRE'),
-                    'confirmed_count': fusion_result.get('confirmed_count', 0),
-                    'ir_only_count': fusion_result.get('ir_only_count', 0),
-                    'eo_annotations': anns_json,
+                    'fire_detected': fusion_payload.get('fire_detected', False),
+                    'confidence': fusion_payload.get('confidence', 0.0),
+                    'status': fusion_payload.get('status', 'NO_FIRE'),
+                    'confirmed_count': fusion_payload.get('confirmed_count', 0),
+                    'ir_only_count': fusion_payload.get('ir_only_count', 0),
+                    'eo_annotations': fusion_payload.get('eo_annotations', []),
                 }
                 
                 # RGB 원본 (저장 모드일 때만)

@@ -18,6 +18,7 @@ import time
 import numpy as np
 import logging
 import threading
+from typing import List, Tuple, Optional
 
 from datetime import datetime
 from core.util import dyn_sleep
@@ -26,7 +27,15 @@ from camera.frame_source import FrameSource
 from .purethermal.thermalcamera import ThermalCamera
 
 
-def detect_fire(data, min_val, tau=0.95, thr=20, raw_thr=5, window_size=10, delta_thr=10):
+def detect_fire(
+    data: np.ndarray,
+    min_val: float,
+    tau: float = 0.95,
+    thr: float = 20,
+    raw_thr: float = 5,
+    window_size: int = 10,
+    delta_thr: float = 10,
+) -> Tuple[bool, Optional[List[Tuple[int, int, int, int]]], List[Tuple[int, int, float, float]]]:
     """
     온도 기반 화점 탐지 알고리즘
     
@@ -155,7 +164,7 @@ def detect_fire(data, min_val, tau=0.95, thr=20, raw_thr=5, window_size=10, delt
         return False, None, []
 
 
-def draw_bbox(frame, datas):
+def draw_bbox(frame: np.ndarray, datas: List[Tuple[int, int, int, int]]) -> np.ndarray:
     """
     화점 탐지 결과를 프레임에 그리기
     
@@ -243,7 +252,7 @@ class IRCamera(FrameSource):
         # 최고 온도 정보 (매 프레임 업데이트)
         self.max_temp_info = None
 
-    def update_fire_params(self, fire_detection=None, min_temp=None, thr=None, raw_thr=None, tau=None):
+    def update_fire_params(self, fire_detection=None, min_temp=None, thr=None, raw_thr=None, tau=None) -> None:
         """런타임에 화점 탐지 파라미터를 업데이트"""
         if fire_detection is not None:
             self.fire_detection_enabled = bool(fire_detection)
@@ -257,7 +266,7 @@ class IRCamera(FrameSource):
             self.tau = float(tau)
 
 
-    def _get_max_temp_info(self, raw16, tau=None):
+    def _get_max_temp_info(self, raw16: np.ndarray, tau: float = None) -> Optional[dict]:
         """
         RAW16 데이터에서 최고 온도 지점 정보 추출
         
@@ -312,7 +321,7 @@ class IRCamera(FrameSource):
             return None
 
 
-    def capture(self):
+    def capture(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[str], Optional[dict], List[Tuple[int, int, float, float]]]:
         """
         단일 프레임 캡처 및 처리
         

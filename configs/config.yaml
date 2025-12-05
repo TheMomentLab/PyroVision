@@ -25,7 +25,7 @@ CAMERA:
     RES: [1280, 720]
     SLEEP: 0.033
     DEVICE: 0
-TARGET_RES: [960, 540]
+TARGET_RES: [960, 544]
 MODEL: /root/lk_fire/model/8n_640_v2/best_full_integer_quant.tflite
 LABEL: /root/lk_fire/model/labels.txt
 DELEGATE: "/usr/lib/libvx_delegate.so" 

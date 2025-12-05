@@ -149,31 +149,35 @@ from core.util import ts_to_epoch_ms  # 추가
 
 **작업 순서**:
 
-**대표 예시 1: sender.py의 connect 메서드 (HIGH 우선순위)**
+**대표 예시 1: sender.py의 check_control_command (HIGH 우선순위)**
 ```python
 # 현재 (문제)
 try:
-    self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    self.sock.connect((host, port))
-    self.connected = True
-except:
+    size_header = self.sock.recv(4)
+    ...
+    payload = ...
+    command_dict = json.loads(payload.decode("utf-8"))
+    ...
+except BlockingIOError:
+    pass  # 데이터 없음 (정상)
+except Exception:
     pass  # ← 모든 예외 무시, 로깅 없음
 
 # 개선
 try:
-    self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    self.sock.connect((host, port))
-    self.connected = True
-    logger.info("Connected to %s:%s", host, port)
-except socket.error as e:
-    logger.error("Socket connection failed: %s", e)
+    size_header = self.sock.recv(4)
+    ...
+    command_dict = json.loads(payload.decode("utf-8"))
+    ...
+except BlockingIOError:
+    pass  # 데이터 없음 (정상)
+except (socket.error, OSError) as e:
+    logger.error("Control command socket error: %s", e)
     self.connected = False
-except OSError as e:
-    logger.error("OS error during connection: %s", e)
-    self.connected = False
+except json.JSONDecodeError as e:
+    logger.warning("Control command decode failed: %s", e)
 except Exception as e:
-    logger.exception("Unexpected error in connect: %s", e)
-    self.connected = False
+    logger.exception("Unexpected control command error: %s", e)
 ```
 
 **대표 예시 2: app.py의 setup_keyboard (MEDIUM 우선순위)**
@@ -200,7 +204,7 @@ except Exception as e:
 ```
 
 **다른 위치 (동일 패턴 적용)**:
-- HIGH: `sender.py` 나머지 6곳 (`check_control_command`, `send_frame_data`, main loop 등) → `socket.error`, `select.error`, `json.JSONDecodeError` 등
+- HIGH: `sender.py` 나머지 6곳 (send_frame_data, close, main loop 등) → `socket.error`, `select.error`, `json.JSONDecodeError` 등
 - MEDIUM: `app.py` 나머지 2곳 (`restore_keyboard`, `check_keyboard`) → `termios.error`, `OSError` 등
 - LOW: `camera/purethermal/thermalcamera.py` 3곳 → `subprocess.CalledProcessError`, `OSError`, `IOError` 등
 
@@ -213,7 +217,7 @@ except Exception as e:
 
 ---
 
-#### 1.4 RGBCamera 재연결/종료 및 로깅 일원화 ⭐️⭐️
+#### 1.4 RGBCamera 재연결/종료 및 로깅 일원화 ⭐️⭐️ ✅
 
 **파일**: `camera/rgbcam.py`
 **문제**:
@@ -235,7 +239,7 @@ except Exception as e:
 
 ---
 
-#### 1.5 ThermalCamera 자원 정리 보장 ⭐️⭐️
+#### 1.5 ThermalCamera 자원 정리 보장 ⭐️⭐️ ✅
 
 **파일**: `camera/purethermal/thermalcamera.py`
 **문제**: 예외 시 프로세스/스레드/큐 종료 누락 가능, `cleanup()`만 의존
@@ -279,7 +283,7 @@ except Exception as e:
 
 ### 작업 항목
 
-#### 2.1 RuntimeController 분리 ⭐️⭐️⭐️⭐️
+#### 2.1 RuntimeController 분리 ⭐️⭐️⭐️⭐️ ✅
 
 **파일**: `app.py` → 새로운 `core/controller.py`
 **문제**: app.py에 런타임 제어 로직 혼재 (277줄)
@@ -328,7 +332,7 @@ from core.controller import RuntimeController, CoordState
 
 ---
 
-#### 2.2 하드코딩된 이미지 크기 제거 ⭐️⭐️⭐️
+#### 2.2 하드코딩된 이미지 크기 제거 ⭐️⭐️⭐️ ✅
 
 **파일**: `sender.py:237-245`, `gui/app_gui.py:241-245`, `gui/app_gui.py:1078-1085`, `core/coord_mapper.py:15-38`
 **문제**: IR(160x120), RGB(960x540) 크기 하드코딩으로 설정값 미반영
@@ -371,7 +375,7 @@ fire_fusion = FireFusionFactory.from_config(cfg)
 
 ---
 
-#### 2.3 타입 힌트 추가 ⭐️⭐️
+#### 2.3 타입 힌트 추가 ⭐️⭐️ ✅
 
 **파일**:
 - `core/coord_mapper.py`
@@ -396,7 +400,7 @@ def ir_to_rgb(self, ir_x: float, ir_y: float) -> Tuple[float, float]:
 
 ---
 
-#### 2.4 sender 네트워크/패킷/퓨전 모듈화 ⭐️⭐️⭐️
+#### 2.4 sender 네트워크/패킷/퓨전 모듈화 ⭐️⭐️⭐️ ✅
 
 **파일**: `sender.py` (200~520라인)
 **문제**: 연결 재시도, 패킷 직렬화, 압축/인코딩, 동기화, 퓨전/라벨링이 단일 루프에 혼재 → 테스트/수정 비용 큼
@@ -416,7 +420,7 @@ def ir_to_rgb(self, ir_x: float, ir_y: float) -> Tuple[float, float]:
 
 ---
 
-#### 2.5 EO-IR 퓨전/표시 로직 통합 ⭐️⭐️
+#### 2.5 EO-IR 퓨전/표시 로직 통합 ⭐️⭐️ ✅
 
 **파일**: `sender.py:430-499`, `gui/app_gui.py:1061-1094`
 **문제**: 퓨전 결과 색상/라벨/좌표 매퍼 갱신 로직이 중복되어 동작 불일치 위험
@@ -435,7 +439,7 @@ def ir_to_rgb(self, ir_x: float, ir_y: float) -> Tuple[float, float]:
 
 ---
 
-#### 2.6 설정 검증 강화 ⭐️⭐️
+#### 2.6 설정 검증 강화 ⭐️⭐️ ✅
 
 **파일**: `configs/get_cfg.py`, `configs/schema.py`
 **문제**: 경로 존재 검증 외에 해상도/타입/배수 제약 확인 없음. README에 960x540은 잘못된 예시지만 기본값과 코드가 불일치.
@@ -456,12 +460,12 @@ def ir_to_rgb(self, ir_x: float, ir_y: float) -> Tuple[float, float]:
 
 ### Phase 2 완료 체크리스트
 
-- [ ] RuntimeController 분리 완료
-- [ ] 하드코딩된 크기 제거 완료
-- [ ] sender 전송/퓨전 루프 모듈화
-- [ ] 퓨전/표시 로직 공통화
-- [ ] 설정 검증 강화(해상도/타입/경로)
-- [ ] 주요 모듈에 타입 힌트 추가
+- [x] RuntimeController 분리 완료
+- [x] 하드코딩된 크기 제거 완료
+- [x] sender 전송/퓨전 루프 모듈화
+- [x] 퓨전/표시 로직 공통화
+- [x] 설정 검증 강화(해상도/타입/경로)
+- [x] 주요 모듈에 타입 힌트 추가
 - [ ] mypy 타입 체크 통과
 - [ ] pytest 통과
 - [ ] 통합 테스트 (GUI + CLI + TCP)

@@ -4,6 +4,8 @@ IR-RGB 좌표 변환 모듈
 IR 카메라 (160x120)와 RGB 카메라 (960x540) 간의 좌표 변환을 수행합니다.
 """
 
+from typing import Tuple
+
 
 class CoordMapper:
     """
@@ -12,8 +14,8 @@ class CoordMapper:
     비율 유지 스케일링 + 중심 정렬 방식을 사용합니다.
     """
     
-    def __init__(self, ir_size=(160, 120), rgb_size=(960, 540), 
-                 offset_x=0, offset_y=0, scale=None):
+    def __init__(self, ir_size: Tuple[float, float] = (160, 120), rgb_size: Tuple[float, float] = (960, 540), 
+                 offset_x: float = 0, offset_y: float = 0, scale: float = None):
         """
         좌표 매퍼 초기화
         
@@ -41,7 +43,7 @@ class CoordMapper:
         self.offset_x = offset_x
         self.offset_y = offset_y
     
-    def ir_to_rgb(self, ir_x, ir_y):
+    def ir_to_rgb(self, ir_x: float, ir_y: float) -> Tuple[float, float]:
         """
         IR 좌표를 RGB 좌표로 변환
         
@@ -56,7 +58,7 @@ class CoordMapper:
         rgb_y = ir_y * self.scale + self.base_offset_y + self.offset_y
         return rgb_x, rgb_y
     
-    def rgb_to_ir(self, rgb_x, rgb_y):
+    def rgb_to_ir(self, rgb_x: float, rgb_y: float) -> Tuple[float, float]:
         """
         RGB 좌표를 IR 좌표로 변환
         
@@ -71,7 +73,7 @@ class CoordMapper:
         ir_y = (rgb_y - self.base_offset_y - self.offset_y) / self.scale
         return ir_x, ir_y
     
-    def ir_bbox_to_rgb(self, ir_bbox):
+    def ir_bbox_to_rgb(self, ir_bbox: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
         """
         IR bbox를 RGB bbox로 변환
         
@@ -87,7 +89,7 @@ class CoordMapper:
         rgb_h = h * self.scale
         return (rgb_x, rgb_y, rgb_w, rgb_h)
     
-    def adjust_offset(self, dx, dy):
+    def adjust_offset(self, dx: float, dy: float) -> None:
         """
         오프셋 조정 (실시간 캘리브레이션용)
         
@@ -98,7 +100,7 @@ class CoordMapper:
         self.offset_x += dx
         self.offset_y += dy
     
-    def adjust_scale(self, ds):
+    def adjust_scale(self, ds: float) -> None:
         """
         스케일 조정 (실시간 캘리브레이션용)
         
@@ -110,7 +112,7 @@ class CoordMapper:
         self.base_offset_x = (self.rgb_w - self.ir_w * self.scale) / 2
         self.base_offset_y = (self.rgb_h - self.ir_h * self.scale) / 2
     
-    def get_params(self):
+    def get_params(self) -> dict:
         """
         현재 파라미터 반환 (저장용)
         
@@ -123,7 +125,7 @@ class CoordMapper:
             'scale': self.scale
         }
     
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (f"CoordMapper(scale={self.scale:.2f}, "
                 f"offset=({self.offset_x:.1f}, {self.offset_y:.1f}))")
 
@@ -173,4 +175,3 @@ def bbox_iou(bbox1, bbox2):
     union = area1 + area2 - intersection
     
     return intersection / union if union > 0 else 0.0
-

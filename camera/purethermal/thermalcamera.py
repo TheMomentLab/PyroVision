@@ -72,8 +72,8 @@ class ThermalCamera:
                         bus = parts[1]
                         device = parts[3].rstrip(':')
                         return f"/dev/bus/usb/{bus}/{device}"
-        except:
-            pass
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
+            logger.debug("[ThermalCam] USB device search failed: %s", e)
         return None
     
     def _reset_usb_device(self):
@@ -125,7 +125,7 @@ class ThermalCamera:
                 'v4l2-ctl', '-d', self.device_path,
                 '--set-fmt-video', f'width={self.width},height={self.height},pixelformat=Y16 '
             ], capture_output=True, timeout=5)
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError) as e:
             logger.error("[ThermalCam] Set format failed: %s", e)
     
     def _capture_loop(self):
@@ -161,9 +161,7 @@ class ThermalCamera:
         except Exception as e:
             logger.exception("[ThermalCam] Capture error: %s", e)
         finally:
-            if hasattr(self, 'proc') and self.proc:
-                self.proc.terminate()
-                self.proc = None
+            self._terminate_proc()
     
     def capture(self):
         """
@@ -183,7 +181,7 @@ class ThermalCamera:
         
         try:
             return self.q.get(timeout=1)
-        except:
+        except Exception:
             return None
     
     def cleanup(self):
@@ -191,19 +189,22 @@ class ThermalCamera:
         self.stop_event.set()
         
         # 스트리밍 프로세스 종료
-        if hasattr(self, 'proc') and self.proc:
-            try:
-                self.proc.terminate()
-                self.proc.wait(timeout=1)
-            except:
-                pass
-            self.proc = None
+        self._terminate_proc()
         
         # 캡처 스레드 종료 대기
         if self.capture_thread and self.capture_thread.is_alive():
             self.capture_thread.join(timeout=2)
         
         self.streaming = False
+
+    def _terminate_proc(self):
+        if hasattr(self, 'proc') and self.proc:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=1)
+            except (subprocess.SubprocessError, OSError) as e:
+                logger.debug("[ThermalCam] Failed to terminate process: %s", e)
+            self.proc = None
     
     def __del__(self):
         self.cleanup()

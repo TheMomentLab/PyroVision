@@ -3,7 +3,6 @@ import subprocess
 import sys
 from pathlib import Path
 from collections import deque
-from datetime import datetime
 import time
 import glob
 import os
@@ -36,7 +35,9 @@ import numpy as np
 import cv2
 
 from core.coord_mapper import CoordMapper
-from core.fire_fusion import FireFusion, apply_vis_mode
+from core.fire_fusion import FireFusion, FireFusionFactory, prepare_fusion_for_output
+from core.util import ts_to_epoch_ms
+from core.state import DEFAULT_LABEL_SCALE
 
 logger = logging.getLogger(__name__)
 
@@ -45,104 +46,8 @@ try:
 except ImportError:
     RollingPlot = None
 
-def _cv_to_qpixmap(frame):
-    if frame is None:
-        return None
-    if frame.ndim == 2:
-        frame = np.stack([frame] * 3, axis=-1)
-    frame_rgb = frame[:, :, ::-1].copy()
-    h, w, ch = frame_rgb.shape
-    bytes_per_line = ch * w
-    qimg = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-    return QPixmap.fromImage(qimg)
-
-
-def _ts_to_epoch_ms(ts):
-    if not ts:
-        return None
-    try:
-        return datetime.strptime(ts, "%y%m%d%H%M%S%f").timestamp() * 1000.0
-    except Exception:
-        return None
-
-
-def _calc_fps(history_ms):
-    if len(history_ms) < 2:
-        return 0.0
-    duration = history_ms[-1] - history_ms[0]
-    if duration <= 0:
-        return 0.0
-    return (len(history_ms) - 1) * 1000.0 / duration
-
-
-def _overlay_text(frame, lines, margin=6, line_height=None, color=(255, 255, 255), font_scale=None):
-    if frame is None:
-        return None
-    out = frame.copy()
-    h, w = out.shape[:2]
-    min_dim = min(h, w)
-    base_dim = 720.0
-    base_scale = 0.5
-    scale = font_scale if font_scale is not None else max(0.25, min(0.9, (min_dim / base_dim) * base_scale))
-    lh = line_height if line_height is not None else max(12, int(18 * (scale / base_scale)))
-    y = margin + lh
-    for line in lines:
-        cv2.putText(out, line, (margin, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 2, cv2.LINE_AA)
-        cv2.putText(out, line, (margin, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
-        y += lh
-    return out
-
-
-def build_overlay(rgb_frame, ir_frame, params):
-    if rgb_frame is None or ir_frame is None:
-        return None
-    if rgb_frame.size == 0 or ir_frame.size == 0:
-        return None
-    # 채널 정규화
-    if rgb_frame.ndim == 2:
-        rgb_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_GRAY2BGR)
-    elif rgb_frame.shape[2] == 4:
-        rgb_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_BGRA2BGR)
-    if ir_frame.ndim == 2:
-        ir_frame = cv2.cvtColor(ir_frame, cv2.COLOR_GRAY2BGR)
-    elif ir_frame.shape[2] == 4:
-        ir_frame = cv2.cvtColor(ir_frame, cv2.COLOR_BGRA2BGR)
-
-    rgb_h, rgb_w = rgb_frame.shape[:2]
-    ir_h, ir_w = ir_frame.shape[:2]
-    mapper = CoordMapper(
-        ir_size=(ir_w, ir_h),
-        rgb_size=(rgb_w, rgb_h),
-        offset_x=params.get('offset_x', 0.0),
-        offset_y=params.get('offset_y', 0.0),
-        scale=params.get('scale'),
-    )
-    scale = mapper.scale
-    target_w = max(1, int(ir_w * scale))
-    target_h = max(1, int(ir_h * scale))
-    ir_resized = cv2.resize(ir_frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-    overlay = rgb_frame.copy()
-    x = int(mapper.base_offset_x + mapper.offset_x)
-    y = int(mapper.base_offset_y + mapper.offset_y)
-
-    x0 = max(0, x)
-    y0 = max(0, y)
-    x1 = min(rgb_w, x + target_w)
-    y1 = min(rgb_h, y + target_h)
-
-    if x0 >= x1 or y0 >= y1:
-        return overlay
-
-    ir_x0 = x0 - x
-    ir_y0 = y0 - y
-    ir_x1 = ir_x0 + (x1 - x0)
-    ir_y1 = ir_y0 + (y1 - y0)
-
-    alpha = 0.4
-    roi_rgb = overlay[y0:y1, x0:x1]
-    roi_ir = ir_resized[ir_y0:ir_y1, ir_x0:ir_x1]
-    cv2.addWeighted(roi_ir, alpha, roi_rgb, 1 - alpha, 0, dst=roi_rgb)
-    return overlay
+from gui.utils import cv_to_qpixmap, calc_fps, build_overlay
+from gui.frame_updater import FrameUpdater
 
 
 def _paths_to_text(value):
@@ -238,13 +143,14 @@ class MainWindow(QMainWindow):
         self._last_det_ts = None
         self._coord_auto_set = False
         coord_params = self.controller.get_coord_cfg() if self.controller else {'offset_x': 0.0, 'offset_y': 0.0, 'scale': 1.0}
-        target_res = getattr(self.config, "TARGET_RES", (960, 540))
+        self.ir_size = tuple(self.controller.ir_cfg.get('RES', (160, 120))) if self.controller else (160, 120)
+        self.rgb_size = tuple(getattr(self.config, "TARGET_RES", (960, 540)))
         self.fire_fusion = FireFusion(
-            ir_size=(160, 120),
-            rgb_size=tuple(target_res),
-            offset_x=0,
-            offset_y=0,
-            scale=None,
+            ir_size=self.ir_size,
+            rgb_size=self.rgb_size,
+            offset_x=coord_params.get('offset_x', 0.0),
+            offset_y=coord_params.get('offset_y', 0.0),
+            scale=coord_params.get('scale')
         )
 
         rgb_input_cfg, ir_input_cfg = (self.controller.get_input_cfg() if self.controller else ({}, {}))
@@ -659,7 +565,31 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_frames)
+        self.frame_updater = FrameUpdater(
+            buffers,
+            controller,
+            self.config,
+            {
+                'rgb_label': self.rgb_label,
+                'det_label': self.det_label,
+                'ir_label': self.ir_label,
+                'overlay_label': self.overlay_label,
+                'rgb_info': self.rgb_info,
+                'det_info': self.det_info,
+                'ir_info': self.ir_info,
+                'status_label': self.status_label,
+                'fusion_info': self.fusion_info if hasattr(self, 'fusion_info') else None,
+            },
+            {
+                'det_plot': self.det_plot,
+                'rgb_plot': self.rgb_plot,
+                'ir_plot': self.ir_plot,
+            },
+            self.sync_cfg,
+        )
+        self.frame_updater.set_fire_fusion(self.fire_fusion)
+
+        self.timer.timeout.connect(self.frame_updater.update_frames)
         self.timer.start(50)
         self.update_device_fields()
 
@@ -950,9 +880,9 @@ class MainWindow(QMainWindow):
             ir_min = ir_meta.get('min_temp', None)
         rgb_frame = rgb_item[0] if rgb_item else None
         ir_frame = ir_item[0] if ir_item else None
-        t_det = _ts_to_epoch_ms(det_ts_str) if det_ts_str else None
-        t_rgb = _ts_to_epoch_ms(rgb_item[1]) if rgb_item else None
-        t_ir = _ts_to_epoch_ms(ir_item[1]) if ir_item else None
+        t_det = ts_to_epoch_ms(det_ts_str) if det_ts_str else None
+        t_rgb = ts_to_epoch_ms(rgb_item[1]) if rgb_item else None
+        t_ir = ts_to_epoch_ms(ir_item[1]) if ir_item else None
 
         if det_item and det_ts_str != self._last_det_ts:
             self._last_det_ts = det_ts_str
@@ -1077,8 +1007,8 @@ class MainWindow(QMainWindow):
             if self.controller:
                 params = self.controller.get_coord_cfg()
                 self.fire_fusion.coord_mapper = CoordMapper(
-                    ir_size=(160, 120),
-                    rgb_size=tuple(getattr(self.config, "TARGET_RES", (960, 540))),
+                    ir_size=self.ir_size,
+                    rgb_size=self.rgb_size,
                     offset_x=params.get('offset_x', 0.0),
                     offset_y=params.get('offset_y', 0.0),
                     scale=params.get('scale'),
@@ -1087,25 +1017,21 @@ class MainWindow(QMainWindow):
                 ir_hotspots = []
             eo_bboxes = [d for d in det_meta if len(d) >= 6]
             fusion = self.fire_fusion.fuse(ir_hotspots, eo_bboxes)
-            anns_in = fusion.get('eo_annotations', [])
-            anns_out = apply_vis_mode(anns_in, vis_mode)
-            logger.debug("[GUI] vis_mode=%s anns_in=%d anns_out=%d ir_hotspot=%d", vis_mode, len(anns_in), len(anns_out), len(ir_hotspots))
-            fusion['eo_annotations'] = anns_out
-            fusion_info = f"{fusion['status']} | conf={fusion['confidence']:.2f} | ir_hotspot={len(ir_hotspots)} | eo={len(eo_bboxes)}"
-            for ann in fusion.get('eo_annotations', []):
-                bbox = ann.get('bbox', [])
-                if len(bbox) < 4:
-                    continue
-                x, y, w, h = bbox
-                color = ann.get('color', (0, 0, 255))
-                x0, y0 = int(x), int(y)
-                x1, y1 = int(x + w), int(y + h)
-                cv2.rectangle(annotated_det, (x0, y0), (x1, y1), color, 3)
-                label = ann.get('label', "")
-                if label:
-                    text_y = max(0, y0 - 6)
-                    cv2.putText(annotated_det, label, (x0, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3, cv2.LINE_AA)
-                    cv2.putText(annotated_det, label, (x0, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 1, cv2.LINE_AA)
+            label_scale = self.controller.get_label_scale() if self.controller else DEFAULT_LABEL_SCALE
+            fusion_payload, annotated_det = prepare_fusion_for_output(
+                fusion,
+                det_frame=annotated_det,
+                vis_mode=vis_mode,
+                label_scale=label_scale,
+                default_label_scale=DEFAULT_LABEL_SCALE,
+                json_safe=False,
+            )
+            if fusion_payload:
+                fusion_info = (
+                    f"{fusion_payload.get('status','NO_FIRE')} | "
+                    f"conf={fusion_payload.get('confidence',0.0):.2f} | "
+                    f"ir_hotspot={len(ir_hotspots)} | eo={len(eo_bboxes)}"
+                )
 
         # Det view 업데이트는 vis_mode 적용 후 그린 annotated_det을 사용
         if annotated_det is not None:

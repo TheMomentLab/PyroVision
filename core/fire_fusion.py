@@ -36,6 +36,43 @@ COLOR_NO_FIRE = (128, 128, 128)   # 회색: 미감지
 logger = logging.getLogger(__name__)
 
 
+class FireFusionFactory:
+    """설정/사이즈 기반 FireFusion 인스턴스 생성기"""
+
+    @staticmethod
+    def from_config(config) -> 'FireFusion':
+        """
+        Args:
+            config: dataclass Config 또는 dict 형태
+        """
+        if config is None:
+            return FireFusion()
+
+        def _get(obj, attr, default=None):
+            if obj is None:
+                return default
+            if isinstance(obj, dict):
+                return obj.get(attr, default)
+            return getattr(obj, attr, default)
+
+        ir_cfg = _get(config, 'CAMERA_IR', {})
+        ir_size = _get(ir_cfg, 'RES', (160, 120)) or (160, 120)
+        rgb_size = _get(config, 'TARGET_RES', (960, 540)) or (960, 540)
+        coord_cfg = _get(config, 'COORD', {}) or {}
+
+        offset_x = _get(coord_cfg, 'offset_x', _get(coord_cfg, 'OFFSET_X', 0.0))
+        offset_y = _get(coord_cfg, 'offset_y', _get(coord_cfg, 'OFFSET_Y', 0.0))
+        scale = _get(coord_cfg, 'scale', _get(coord_cfg, 'SCALE', None))
+
+        return FireFusion(
+            ir_size=tuple(ir_size),
+            rgb_size=tuple(rgb_size),
+            offset_x=offset_x if offset_x is not None else 0.0,
+            offset_y=offset_y if offset_y is not None else 0.0,
+            scale=scale
+        )
+
+
 class FireFusion:
     """
     EO-IR 화재 감지 융합 클래스
@@ -330,3 +367,46 @@ def apply_vis_mode(annotations, mode="test"):
             logger.debug("[VIS_MODE temp] confirmed -> yellow: %s", new_ann)
         adjusted.append(new_ann)
     return adjusted
+
+
+def prepare_fusion_for_output(
+    fusion_result,
+    det_frame=None,
+    vis_mode="test",
+    label_scale=1.0,
+    default_label_scale=1.0,
+    json_safe=False,
+):
+    """
+    Fusion 결과를 시각화 모드/라벨 스케일에 맞게 가공하고,
+    필요 시 프레임에 annotation을 그린다.
+
+    Returns:
+        (fusion_payload, annotated_frame)
+    """
+    if not fusion_result:
+        return None, det_frame
+
+    anns_in = fusion_result.get('eo_annotations') or []
+    anns_out = apply_vis_mode(anns_in, vis_mode)
+
+    fusion_payload = dict(fusion_result)
+    fusion_payload['eo_annotations'] = []
+    for ann in anns_out:
+        ann_copy = dict(ann)
+        color = ann_copy.get('color')
+        if json_safe and color is not None:
+            ann_copy['color'] = list(color)
+        fusion_payload['eo_annotations'].append(ann_copy)
+
+    annotated_frame = det_frame
+    if det_frame is not None and anns_out:
+        thickness_scale = label_scale / default_label_scale if default_label_scale else 1.0
+        annotated_frame = draw_fire_annotations(
+            det_frame,
+            anns_out,
+            font_scale=label_scale,
+            thickness_scale=thickness_scale,
+        )
+
+    return fusion_payload, annotated_frame

@@ -1,0 +1,43 @@
+CAMERA:
+  IR:
+    DEVICE: "/dev/video3"
+    TAU: 0.5
+    FIRE_DETECTION: true
+    FIRE_MIN_TEMP: 80
+    FIRE_THR: 20
+    FIRE_RAW_THR: 5
+    FPS: 9
+    RES: [160, 120]
+    SLEEP: 0.11
+    ROTATE: 0
+    FLIP_H: false
+    FLIP_V: false
+  RGB_FRONT:
+    FPS: 15
+    RES: [320, 240]
+    SLEEP: 0.066
+    DEVICE: "/dev/video5"
+    ROTATE: 0
+    FLIP_H: false
+    FLIP_V: false
+
+TARGET_RES: [960, 544]
+MODEL: /root/lk_fire/model/8n_640_v2/best_full_integer_quant.tflite
+LABEL: /root/lk_fire/model/labels.txt
+DELEGATE: "/usr/lib/libvx_delegate.so"
+
+SERVER:
+  IP: '192.168.50.178'
+  PORT: 9999
+  COMP_RATIO: 70
+
+DISPLAY:
+  ENABLED: false
+  WINDOW_NAME: "Vision AI Display"
+
+STATE:
+  FIRE:
+    CONFIDENCE: 0.01
+
+CAPTURE:
+  OUTPUT_DIR: "./capture_session"
