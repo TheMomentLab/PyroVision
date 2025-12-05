@@ -1,6 +1,6 @@
-% PYQT GUI 설계서
+# PyroVision GUI 설계서
 
-# PyQt GUI 설계서
+> PyQt6 기반 화재 감지 시스템 GUI 인터페이스
 
 ## 1. 목표
 - CLI 기반 제어/모니터링을 PyQt GUI로 확장하여 현장 운용/디버깅 효율을 높인다.
