@@ -1,0 +1,20 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Editor / venv
+.vscode/
+.idea/
+.env
+.venv/
+
+# Runtime artifacts
+*.log
+*.csv
+*.npy
+*.mp4
+capture_session*/
+save/
+
+# OS
+.DS_Store

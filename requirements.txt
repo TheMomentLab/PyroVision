@@ -1,0 +1,14 @@
+# Core runtime
+numpy>=1.24,<2.0
+pyyaml>=6.0,<7.0
+opencv-python-headless>=4.8.0
+
+# Inference (CPU / NPU delegate-ready)
+tflite-runtime>=2.14.0
+
+# GUI (optional, for APP_MODE=gui)
+PyQt6>=6.6.0
+
+# NOTE:
+# - i.MX8M Plus 보드에서는 BSP에 포함된 OpenCV/tflite 패키지를 우선 사용하세요.
+#   위 opencv-python-headless/tflite-runtime 라인은 PC 개발 환경 기본값입니다.
